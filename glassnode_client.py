@@ -318,13 +318,14 @@ class GlassnodeAPIClient:
         interval: Optional[str] = "24h",
         currency: Optional[str] = "native",
         paginate: bool = False,
+        return_format: Optional[str] = None,
         **kwargs
-    ) -> Dict:
+    ) -> Union[Dict, 'pd.DataFrame']:
         """
         Fetch data for a metric using Glassnode's bulk endpoint.
 
         The bulk endpoint allows fetching data for multiple parameter combinations
-        (like multiple assets) in a single API call.
+        (like multiple assets) in a single API call. Note: Bulk endpoint always returns JSON.
 
         Args:
             path: The metric path without the "/bulk" suffix (e.g., "market/price_usd_close")
@@ -333,28 +334,42 @@ class GlassnodeAPIClient:
             until: Optional end date as Unix timestamp, string date format, or datetime object
             interval: Optional resolution interval (defaults to "24h")
             currency: Optional currency for metrics that support it ("native" or "USD")
-            paginate: If True, automatically handle pagination for large time ranges
+            paginate: If True, automatically handle pagination for large time ranges.
+                      The returned DataFrame will contain combined data from all pages.
+            return_format: Desired format for the returned data. Options:
+                - "raw": Returns the raw JSON response as a dictionary.
+                - "pandas": Returns a pandas DataFrame with a datetime index and columns derived
+                          from the identifiers in the bulk data (e.g., 'BTC_price', 'ETH_network_arb').
+                          Requires pandas to be installed.
+                - None (default): Uses the client's `return_format_default` attribute.
             **kwargs: Additional parameters to pass to the API
 
         Returns:
-            Dict: Bulk metric data in the format described in the Glassnode documentation
+            Union[Dict, pd.DataFrame]: Bulk metric data in the specified format.
+            - If the effective format is "raw", returns the raw response dictionary.
+            - If the effective format is "pandas", returns a pandas DataFrame.
 
         Raises:
-            ValueError: If the metric does not support bulk operations or format is not JSON.
+            ValueError: If the metric does not support bulk operations, if the effective return_format
+                      is invalid, or if DataFrame conversion fails.
             requests.exceptions.HTTPError: For API request errors.
+            ImportError: If return_format="pandas" is requested but pandas is not installed.
 
         Note:
             The response format differs from regular metrics. See:
             https://docs.glassnode.com/basic-api/bulk-metrics
 
-            Timerange constraints by interval:
+            Timerange constraints by interval apply when paginate=False:
             - 10m and 1h resolutions: 10 days
             - 24h resolution: 31 days
             - 1w and 1month resolutions: 93 days
             
-            When paginate=True, multiple API calls may be made to fetch data beyond
-            these constraints.
+            The effective return format is determined by the `return_format` parameter.
+            If `return_format` is None, `self.return_format_default` is used.
         """
+        # Determine the effective return format
+        effective_format = return_format if return_format is not None else self.return_format_default
+        
         # Check if the metric supports bulk operations
         metadata = self.get_metric_metadata(path)
         if not metadata.get("bulk_supported", False):
@@ -373,39 +388,53 @@ class GlassnodeAPIClient:
             params["c"] = currency
 
         # Set until timestamp
-        until_ts = int(time.time()) if until is None else convert_to_unix_timestamp(until)
-        
-        # Handle pagination if requested
+        until_ts = int(time.time()) if until is None else utils.convert_to_unix_timestamp(until)
+
+        # --- Fetch Raw Data (Handle Pagination) --- 
+        raw_response: Dict
         if paginate:
             # Convert since to timestamp if provided
-            since_ts = convert_to_unix_timestamp(since) if since is not None else None
+            since_ts = utils.convert_to_unix_timestamp(since) if since is not None else None
             
-            return self._paginated_bulk_fetch(
-                bulk_path, 
-                params, 
-                since=since_ts, 
-                until=until_ts, 
+            # Paginated fetch always returns a dictionary (combined raw data)
+            raw_response = self._paginated_bulk_fetch(
+                bulk_path,
+                params,
+                since=since_ts,
+                until=until_ts,
                 interval=interval
             )
-        
-        # Non-paginated request (original behavior)
-        max_days = self.BULK_MAX_DAYS[interval]
-        max_timerange = max_days * 24 * 60 * 60
-
-        # Calculate appropriate since timestamp
-        if since is None:
-            # If no since is provided, use the maximum allowed timerange
-            since_ts = until_ts - max_timerange
         else:
-            # Convert provided since value to timestamp
-            since_ts = convert_to_unix_timestamp(since)
-            
-            # If timerange exceeds limit, adjust since to respect the constraint
-            if (until_ts - since_ts) > max_timerange:
+            # Non-paginated request
+            max_days = self.BULK_MAX_DAYS[interval]
+            max_timerange = max_days * 24 * 60 * 60
+
+            # Calculate appropriate since timestamp
+            if since is None:
                 since_ts = until_ts - max_timerange
-                print(f"Warning: Requested timerange for interval '{interval}' exceeds {max_days} days. Adjusting 'since' timestamp.")
+            else:
+                since_ts = utils.convert_to_unix_timestamp(since)
+                if (until_ts - since_ts) > max_timerange:
+                    since_ts = until_ts - max_timerange
+                    print(f"Warning: Requested timerange for interval '{interval}' exceeds {max_days} days. Adjusting 'since' timestamp.")
 
-        params["s"] = since_ts
-        params["u"] = until_ts
+            params["s"] = since_ts
+            params["u"] = until_ts
 
-        return self._make_request(f"metrics{bulk_path}", params) 
+            # Single request returns a dictionary
+            raw_response = self._make_request(f"metrics{bulk_path}", params)
+        # --- End Fetch Raw Data --- 
+
+        # --- Process based on effective format --- 
+        if effective_format == "pandas":
+            try:
+                # Use the dedicated bulk conversion function
+                return utils.convert_bulk_to_dataframe(raw_response)
+            except ImportError:
+                 raise ImportError("Pandas is required for 'pandas' return format. Please install pandas.")
+            except ValueError as e:
+                raise ValueError(f"Failed to convert bulk data to DataFrame: {e}")
+        elif effective_format == "raw":
+            return raw_response
+        else:
+             raise ValueError(f"Invalid effective return_format: '{effective_format}'. Must be 'raw' or 'pandas'.") 

@@ -238,3 +238,101 @@ def convert_to_dataframe(data: Union[List[Dict[str, Any]], str], path: str) -> p
 
     else:
         raise ValueError(f"Unexpected data type for DataFrame conversion: {type(data)}") 
+
+def convert_bulk_to_dataframe(bulk_response: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Convert a Glassnode bulk API response (dictionary format) into a pandas DataFrame.
+
+    Assumes the input is the direct dictionary returned by the API call,
+    containing a 'data' key with a list of timestamped bulk items.
+
+    Args:
+        bulk_response: The raw dictionary response from a bulk API endpoint.
+
+    Returns:
+        pd.DataFrame: A DataFrame where the index is datetime timestamps, and
+                      columns represent the unique combinations of identifiers
+                      found in the bulk data (e.g., 'BTC_price', 'ETH_network_arb').
+
+    Raises:
+        ValueError: If the input format is not the expected dictionary structure,
+                    or if conversion fails.
+        ImportError: If pandas is not installed.
+    """
+    if not isinstance(bulk_response, dict) or 'data' not in bulk_response:
+        raise ValueError("Input must be a dictionary with a 'data' key containing the bulk list.")
+
+    data_list = bulk_response['data']
+    if not isinstance(data_list, list):
+        raise ValueError("The 'data' key must contain a list.")
+
+    if not data_list:
+        return pd.DataFrame() # Return empty DataFrame if no data
+
+    # Use a dictionary to collect data before creating DataFrame for efficiency
+    # Structure: {timestamp: {column_name: value, ...}, ...}
+    data_for_df = {}
+
+    processed_column_names = set() # To track unique columns generated
+
+    for timestamp_entry in data_list:
+        if not isinstance(timestamp_entry, dict) or 't' not in timestamp_entry or 'bulk' not in timestamp_entry:
+            print(f"Warning: Skipping invalid timestamp entry: {timestamp_entry}")
+            continue
+
+        timestamp = timestamp_entry['t']
+        bulk_items = timestamp_entry['bulk']
+
+        if timestamp not in data_for_df:
+            data_for_df[timestamp] = {}
+
+        if not isinstance(bulk_items, list):
+             print(f"Warning: Skipping invalid bulk entry (not a list) for timestamp {timestamp}: {bulk_items}")
+             continue
+             
+        for item in bulk_items:
+            if not isinstance(item, dict) or 'v' not in item:
+                print(f"Warning: Skipping invalid item within bulk list for timestamp {timestamp}: {item}")
+                continue
+
+            value = item['v']
+            identifiers = {k: v for k, v in item.items() if k != 'v'}
+            
+            # --- Generate Column Name ---            
+            col_parts = []
+            asset = identifiers.pop('a', None) # Extract asset 'a' if present
+            if asset:
+                col_parts.append(str(asset))
+            
+            # Add other identifiers sorted by key
+            for key in sorted(identifiers.keys()):
+                col_parts.append(f"{key}_{identifiers[key]}")
+                
+            if not col_parts: # Handle cases where there might be no identifiers other than 'v'
+                column_name = 'value' # Or potentially derive from path if available
+            else:
+                column_name = "_".join(col_parts)
+            # --- End Column Name Generation --- 
+            
+            # Add data point to the collection for this timestamp
+            if column_name in data_for_df[timestamp]:
+                 print(f"Warning: Duplicate column name '{column_name}' generated for timestamp {timestamp}. Check identifiers in bulk data. Overwriting previous value.")
+            data_for_df[timestamp][column_name] = value
+            processed_column_names.add(column_name)
+
+    # Convert the collected data into a DataFrame
+    if not data_for_df:
+         return pd.DataFrame() # Return empty if nothing was processed
+         
+    try:
+        df = pd.DataFrame.from_dict(data_for_df, orient='index')
+        # Ensure all columns discovered across all timestamps are present
+        df = df.reindex(columns=sorted(list(processed_column_names))) 
+        
+        # Convert index (timestamps) to datetime
+        df.index = pd.to_datetime(df.index, unit='s')
+        df.index.name = 't' # Name the index
+    except Exception as e:
+        raise ValueError(f"Failed to create DataFrame from processed bulk data: {e}")
+
+    return df 
