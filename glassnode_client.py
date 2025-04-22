@@ -10,6 +10,12 @@ import time
 import datetime
 import re
 from utils import convert_to_unix_timestamp, merge_bulk_data
+import utils
+
+# Conditional import for pandas type hinting
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 class GlassnodeAPIClient:
@@ -31,17 +37,22 @@ class GlassnodeAPIClient:
         "1month": 93
     }
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, return_format: str = "raw"):
         """
         Initialize the Glassnode API client.
 
         Args:
             api_key: API key for Glassnode API authentication
+            
+        Attributes:
+            return_format_default (str): Default format for fetch_metric ('raw' or 'pandas').
+                                       Can be changed after initialization.
         """
         self.api_key = api_key
         self.session = requests.Session()
         self.session.params = {"api_key": self.api_key} # Add API key globally for the session
         self.session.timeout = 30.0 # Set a timeout for requests
+        self.return_format_default = return_format # Default return format for fetch_metric
 
     def _make_request(
         self,
@@ -141,8 +152,9 @@ class GlassnodeAPIClient:
         interval: Optional[str] = None,
         format: Optional[str] = "json",
         currency: Optional[str] = "native",
+        return_format: Optional[str] = None,
         **kwargs
-    ) -> Union[List[Dict], str]:
+    ) -> Union[List[Dict], str, 'pd.DataFrame']:
         """
         Fetch data for a specific metric.
 
@@ -152,20 +164,38 @@ class GlassnodeAPIClient:
             since: Optional start date as Unix timestamp, string date format, or datetime object
             until: Optional end date as Unix timestamp, string date format, or datetime object
             interval: Optional resolution interval
-            format: Response format ('json' or 'csv')
+            format: Response format ('json' or 'csv'). Note: 'pandas' return format works best with 'json'.
             currency: Optional currency for metrics that support it ("native" or "USD")
+            return_format: Desired format for the returned data. Options:
+                - "raw": Returns the raw response (List[Dict] for JSON, str for CSV).
+                - "pandas": Returns a pandas DataFrame with a datetime index and a value column.
+                  Requires pandas to be installed.
+                - None (default): Uses the client's `return_format_default` attribute.
             **kwargs: Additional parameters to pass to the API
 
         Returns:
-            Union[List[Dict], str]: Metric data as list of dictionaries or CSV string
+            Union[List[Dict], str, pd.DataFrame]: Metric data in the specified format.
+            - If the effective format is "raw", returns List[Dict] (for format="json") or str (for format="csv").
+            - If the effective format is "pandas", returns a pandas DataFrame.
+            
+        Raises:
+            ValueError: If the effective return_format is invalid, or if data conversion fails.
+            
+        Note:
+            The effective return format is determined by the `return_format` parameter.
+            If `return_format` is None, `self.return_format_default` is used.
+            You can set `client.return_format_default = 'pandas'` to change the default behavior.
         """
+        # Determine the effective return format
+        effective_format = return_format if return_format is not None else self.return_format_default
+        
         params = {"a": asset, "f": format, **kwargs}
 
         if since is not None:
-            params["s"] = convert_to_unix_timestamp(since)
+            params["s"] = utils.convert_to_unix_timestamp(since)
 
         if until is not None:
-            params["u"] = convert_to_unix_timestamp(until)
+            params["u"] = utils.convert_to_unix_timestamp(until)
 
         if interval is not None:
             params["i"] = interval
@@ -173,8 +203,22 @@ class GlassnodeAPIClient:
         if currency is not None:
             params["c"] = currency
 
-        # The _make_request method now handles CSV vs JSON based on response headers/decode errors
-        return self._make_request(f"metrics{path}", params)
+        # Fetch the raw data
+        raw_response = self._make_request(f"metrics{path}", params)
+
+        # Process based on the effective format
+        if effective_format == "pandas":
+            try:
+                # Attempt conversion using the utility function
+                return utils.convert_to_dataframe(raw_response, path)
+            except ValueError as e:
+                # Re-raise conversion errors with more context
+                raise ValueError(f"Failed to convert data to DataFrame: {e}")
+        elif effective_format == "raw":
+            # Return the raw response as is
+            return raw_response
+        else:
+            raise ValueError(f"Invalid effective return_format: '{effective_format}'. Must be 'raw' or 'pandas'.")
 
     def _paginated_bulk_fetch(
         self,
