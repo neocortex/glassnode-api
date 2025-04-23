@@ -9,7 +9,7 @@ import json
 import time
 import datetime
 import re
-from utils import convert_to_unix_timestamp, merge_bulk_data, convert_to_dataframe, convert_bulk_to_dataframe
+from .utils import convert_to_unix_timestamp, merge_bulk_data, convert_to_dataframe, convert_bulk_to_dataframe
 import pandas as pd
 
 
