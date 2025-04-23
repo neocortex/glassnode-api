@@ -13,11 +13,6 @@ from utils import convert_to_unix_timestamp, merge_bulk_data
 import utils
 import pandas as pd
 
-# Conditional import for pandas type hinting
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    import pandas as pd
-
 
 class GlassnodeAPIClient:
     """
@@ -442,8 +437,6 @@ class GlassnodeAPIClient:
                     raw_response,
                     output_structure=effective_bulk_structure
                 )
-            except ImportError:
-                 raise ImportError("Pandas is required for 'pandas' return format. Please install pandas.")
             except ValueError as e:
                 # Add context about the requested structure to the error
                 raise ValueError(f"Failed to convert bulk data to DataFrame (structure='{effective_bulk_structure}'): {e}")

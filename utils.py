@@ -2,7 +2,7 @@
 Utility functions for Glassnode API client
 """
 import datetime
-from typing import Union, List, Dict, Any
+from typing import Union, List, Dict, Any, Tuple, Set
 import pandas as pd
 from io import StringIO
 
@@ -110,6 +110,233 @@ def merge_bulk_data(combined_data, chunk_data, direction="forward"):
     
     return combined_data 
 
+# --- Helper Functions ---
+
+def _get_column_name_from_path(path: str) -> str:
+    """Extract a column name from the metric path."""
+    try:
+        return path.strip('/').split('/')[-1] if '/' in path else 'value'
+    except Exception:
+        return 'value' # Fallback column name
+
+def _dataframe_from_csv(csv_string: str, path: str) -> pd.DataFrame:
+    """Convert CSV string data to a pandas DataFrame."""
+    try:
+        df = pd.read_csv(StringIO(csv_string))
+        timestamp_col = 'timestamp'
+
+        if timestamp_col not in df.columns:
+            raise ValueError(f"CSV data missing expected timestamp column '{timestamp_col}'")
+
+        # Convert timestamp column to datetime
+        if pd.api.types.is_numeric_dtype(df[timestamp_col]):
+            df[timestamp_col] = pd.to_datetime(df[timestamp_col], unit='s')
+        else:
+            try:
+                df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+            except ValueError as e:
+                 raise ValueError(f"Failed to parse timestamp column '{timestamp_col}' in CSV: {e}")
+
+        df = df.set_index(timestamp_col)
+
+        # Handle single vs multi-column CSV
+        if len(df.columns) == 1:
+            col_name = _get_column_name_from_path(path)
+            df = df.rename(columns={df.columns[0]: col_name})
+        elif len(df.columns) > 1:
+            # Keep original columns for multi-column data (e.g., HODL waves)
+            pass
+        else:
+            raise ValueError("CSV data has timestamp column but no data columns.")
+
+        return df
+    except Exception as e:
+        # Catch potential pd.errors.EmptyDataError from read_csv if string is empty/invalid
+        # and other parsing errors
+        if isinstance(e, ValueError): # Keep specific ValueErrors
+            raise e
+        raise ValueError(f"Failed to parse CSV data into DataFrame: {e}")
+
+def _dataframe_from_json_standard(json_list: List[Dict[str, Any]], path: str) -> pd.DataFrame:
+    """Convert standard JSON format [{'t': ts, 'v': val}, ...] to DataFrame."""
+    try:
+        df = pd.DataFrame(json_list)
+        if not all('v' in item for item in json_list):
+             raise ValueError("Inconsistent JSON format: some items missing 'v' key.")
+
+        df['t'] = pd.to_datetime(df['t'], unit='s')
+        df = df.set_index('t')
+
+        column_name = _get_column_name_from_path(path)
+        df = df.rename(columns={'v': column_name})
+
+        if column_name in df.columns:
+            df = df[[column_name]] # Keep only the renamed value column
+        else:
+            # This case should ideally not happen if 'v' exists and rename succeeds
+            raise ValueError(f"Failed to find or rename column 'v' to '{column_name}'.")
+        return df
+    except Exception as e:
+        if isinstance(e, ValueError): raise e
+        raise ValueError(f"Failed to convert standard JSON [{'t': ..., 'v': ...}] to DataFrame: {e}")
+
+
+def _dataframe_from_json_nested(json_list: List[Dict[str, Any]]) -> pd.DataFrame:
+    """Convert nested JSON format [{'t': ts, 'o': {'k': v}}, ...] to DataFrame."""
+    try:
+        records = []
+        for item in json_list:
+            if isinstance(item, dict) and 't' in item and 'o' in item and isinstance(item['o'], dict):
+                record = {'t': item['t'], **item['o']}
+                records.append(record)
+            else:
+                print(f"Warning: Skipping item with unexpected structure in nested JSON: {item}")
+
+        if not records:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records)
+        df['t'] = pd.to_datetime(df['t'], unit='s')
+        df = df.set_index('t')
+        # Columns are automatically named from the keys in 'o'
+        return df
+    except Exception as e:
+        raise ValueError(f"Failed to convert nested JSON [{'t': ..., 'o': {...}}] to DataFrame: {e}")
+
+
+def _dataframe_from_json(json_list: List[Dict[str, Any]], path: str) -> pd.DataFrame:
+    """Convert JSON list data to a pandas DataFrame, detecting the format."""
+    if not json_list:
+        return pd.DataFrame()
+
+    if not isinstance(json_list[0], dict) or 't' not in json_list[0]:
+        raise ValueError("JSON list items must be dictionaries with a 't' timestamp key.")
+
+    first_item = json_list[0]
+
+    if 'v' in first_item:
+        return _dataframe_from_json_standard(json_list, path)
+    elif 'o' in first_item and isinstance(first_item['o'], dict):
+        return _dataframe_from_json_nested(json_list)
+    else:
+        raise ValueError("JSON data does not match expected formats: [{'t':..., 'v':...}] or [{'t':..., 'o':{...}}]")
+
+
+def _flatten_bulk_response(data_list: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, Set[str], Set[str]]:
+    """Parse and flatten the bulk API response data."""
+    flat_data = []
+    all_metric_keys = set()
+    all_assets = set()
+
+    for timestamp_entry in data_list:
+        if not isinstance(timestamp_entry, dict) or 't' not in timestamp_entry or 'bulk' not in timestamp_entry:
+            print(f"Warning: Skipping invalid timestamp entry: {timestamp_entry}")
+            continue
+
+        timestamp = timestamp_entry['t']
+        bulk_items = timestamp_entry['bulk']
+
+        if not isinstance(bulk_items, list):
+            print(f"Warning: Skipping invalid bulk entry (not a list) for timestamp {timestamp}: {bulk_items}")
+            continue
+
+        for item in bulk_items:
+            if not isinstance(item, dict) or 'v' not in item:
+                print(f"Warning: Skipping invalid item within bulk list for timestamp {timestamp}: {item}")
+                continue
+
+            value = item['v']
+            identifiers = {k: str(v) for k, v in item.items() if k != 'v'}
+
+            asset = identifiers.pop('a', None)
+            all_assets.add(asset) # Add asset (even if None)
+
+            # Generate the metric_key from remaining identifiers (sorted for consistency)
+            metric_parts = [f"{k}_{identifiers[k]}" for k in sorted(identifiers.keys())]
+            metric_key = "_".join(metric_parts) if metric_parts else (str(asset) if asset else 'value') # Fallback naming
+            all_metric_keys.add(metric_key)
+
+            flat_data.append({
+                't': timestamp,
+                'asset': asset,
+                'metric_key': metric_key,
+                'value': value
+            })
+
+    if not flat_data:
+        return pd.DataFrame(), all_assets, all_metric_keys
+
+    flat_df = pd.DataFrame(flat_data)
+    flat_df['t'] = pd.to_datetime(flat_df['t'], unit='s')
+    return flat_df, all_assets, all_metric_keys
+
+
+def _structure_bulk_dataframe(
+    flat_df: pd.DataFrame,
+    output_structure: str,
+    all_assets: Set[str],
+    all_metric_keys: Set[str]
+) -> Union[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    """Pivot and structure the flattened bulk data according to the desired output."""
+    try:
+        if output_structure == "wide":
+            def create_wide_col_name(row):
+                asset_str = str(row['asset']) if row['asset'] is not None else 'None'
+                # Avoid 'None_' prefix if asset is None
+                if row['asset'] is None:
+                    return row['metric_key']
+                # Avoid double asset name if metric_key *is* the asset name
+                if row['metric_key'] == asset_str:
+                     return asset_str
+                return f"{asset_str}_{row['metric_key']}"
+
+            if flat_df.empty: return pd.DataFrame() # Handle empty case before applying
+            flat_df['wide_col'] = flat_df.apply(create_wide_col_name, axis=1)
+            wide_df = flat_df.pivot_table(index='t', columns='wide_col', values='value')
+            # Ensure consistent column order? Maybe not strictly necessary for 'wide'
+            # wide_df = wide_df.reindex(columns=sorted(wide_df.columns))
+            return wide_df
+
+        elif output_structure == "dict_by_asset":
+            result_dict = {}
+            if flat_df.empty: return result_dict # Handle empty case before grouping
+            # Use pd.Categorical for potentially better grouping performance
+            flat_df['asset_cat'] = pd.Categorical(flat_df['asset'].apply(lambda x: str(x) if x is not None else 'None'))
+            sorted_metric_keys = sorted(list(all_metric_keys))
+            # Use observed=True if pandas >= 1.5, False otherwise for older versions
+            # Using observed=False to maintain compatibility across versions and handle potential empty categories
+            for asset, group_df in flat_df.groupby('asset_cat', observed=False):
+                # Use asset's original type (before categorization) as dict key if possible
+                original_asset = next((a for a in all_assets if str(a) == asset), asset) # Find original None/value
+                asset_df = group_df.pivot_table(index='t', columns='metric_key', values='value')
+                # Reindex to ensure all metric keys are present as columns, filled with NaN
+                asset_df = asset_df.reindex(columns=sorted_metric_keys)
+                result_dict[original_asset] = asset_df
+            return result_dict
+
+        elif output_structure == "dict_by_metric":
+            result_dict = {}
+            if flat_df.empty: return result_dict # Handle empty case before grouping
+            flat_df['metric_key_cat'] = pd.Categorical(flat_df['metric_key'])
+            # Ensure assets used for columns are strings or handle None appropriately
+            asset_cols = sorted([str(a) if a is not None else 'None' for a in all_assets])
+            # Use observed=False for consistent behavior
+            for metric_key, group_df in flat_df.groupby('metric_key_cat', observed=False):
+                metric_df = group_df.pivot_table(index='t', columns='asset', values='value')
+                # Standardize column names (including handling None asset) before reindexing
+                metric_df.columns = [str(c) if c is not None else 'None' for c in metric_df.columns]
+                # Reindex to ensure all assets are present as columns, filled with NaN
+                metric_df = metric_df.reindex(columns=asset_cols)
+                result_dict[metric_key] = metric_df
+            return result_dict
+
+    except Exception as e:
+        # Add more specific error context if possible
+        raise ValueError(f"Failed to create output structure '{output_structure}' from bulk data: {e}")
+
+
+# --- Original Functions (Refactored) ---
+
 def convert_to_dataframe(data: Union[List[Dict[str, Any]], str], path: str) -> pd.DataFrame:
     """
     Convert Glassnode API response (JSON or CSV) to a pandas DataFrame.
@@ -119,125 +346,21 @@ def convert_to_dataframe(data: Union[List[Dict[str, Any]], str], path: str) -> p
         path: The metric path used for the request (used for column naming).
 
     Returns:
-        pd.DataFrame: A DataFrame with a datetime index and a value column.
+        pd.DataFrame: A DataFrame with a datetime index and appropriate columns.
 
     Raises:
         ValueError: If the input data format is unexpected or conversion fails.
-        ImportError: If pandas is not installed.
     """
     if not data:
         return pd.DataFrame() # Return empty DataFrame for empty data
 
-    try:
-        # Attempt to extract a meaningful column name from the path
-        column_name = path.strip('/').split('/')[-1] if '/' in path else 'value'
-    except Exception:
-        column_name = 'value' # Fallback column name
-
-    if isinstance(data, str): # Handle CSV data
-        try:
-            # Use StringIO to treat the string data as a file
-            df = pd.read_csv(StringIO(data))
-            if 't' not in df.columns:
-                 raise ValueError("CSV data missing expected timestamp column 't'")
-                 
-            # Determine the value column name (often 'v', but could be different)
-            value_col = 'v' # Default assumption
-            if value_col not in df.columns:
-                # If 'v' isn't present, try to infer it (e.g., the first non-'t' column)
-                potential_v_cols = [col for col in df.columns if col != 't']
-                if not potential_v_cols:
-                    raise ValueError("CSV data missing a value column ('v' or other).")
-                value_col = potential_v_cols[0] # Use the first other column as value
-                print(f"Warning: CSV data missing 'v' column, using '{value_col}' as value.")
-
-
-            # Convert timestamp 't' to datetime and set as index
-            df['t'] = pd.to_datetime(df['t'], unit='s')
-            df = df.set_index('t')
-
-            # Rename the determined value column to the desired column_name
-            df = df.rename(columns={value_col: column_name})
-
-            # Keep only the renamed value column
-            if column_name in df.columns:
-                df = df[[column_name]]
-            else:
-                 raise ValueError(f"Could not find or rename value column '{value_col}' to '{column_name}' from CSV.")
-
-            return df
-
-        except Exception as e:
-            raise ValueError(f"Failed to parse CSV data into DataFrame: {e}")
-
-    elif isinstance(data, list): # Handle JSON data
-        if not data:
-            return pd.DataFrame()
-
-        if not isinstance(data[0], dict) or 't' not in data[0]:
-             raise ValueError("JSON list items must be dictionaries with a 't' timestamp key.")
-
-        first_item = data[0]
-
-        # Case 1: Standard format [{'t': timestamp, 'v': value}, ...]
-        if 'v' in first_item:
-            try:
-                df = pd.DataFrame(data)
-                # Ensure 'v' exists in all items if present in the first
-                if not all('v' in item for item in data):
-                     raise ValueError("Inconsistent JSON format: some items missing 'v' key.")
-                     
-                df['t'] = pd.to_datetime(df['t'], unit='s')
-                df = df.set_index('t')
-                
-                # Use path for column name if possible
-                try:
-                    column_name = path.strip('/').split('/')[-1] if '/' in path else 'value'
-                except Exception:
-                    column_name = 'value'
-                    
-                df = df.rename(columns={'v': column_name})
-                # Keep only the renamed value column
-                if column_name in df.columns:
-                    df = df[[column_name]]
-                else:
-                    raise ValueError(f"Failed to find or rename column 'v' to '{column_name}'.")
-                return df
-            except Exception as e:
-                raise ValueError(f"Failed to convert standard JSON [{'t': ..., 'v': ...}] to DataFrame: {e}")
-
-        # Case 2: Nested object format [{'t': timestamp, 'o': {'k1': v1, 'k2': v2}}, ...]
-        elif 'o' in first_item and isinstance(first_item['o'], dict):
-            try:
-                records = []
-                for item in data:
-                    if isinstance(item, dict) and 't' in item and 'o' in item and isinstance(item['o'], dict):
-                        # Flatten the structure: combine 't' with keys from 'o'
-                        record = {'t': item['t'], **item['o']}
-                        records.append(record)
-                    else:
-                        # Handle items that don't match the expected nested structure
-                        print(f"Warning: Skipping item with unexpected structure in nested JSON: {item}")
-                
-                if not records:
-                    return pd.DataFrame() # Return empty if no valid records found
-                    
-                df = pd.DataFrame(records)
-                df['t'] = pd.to_datetime(df['t'], unit='s')
-                df = df.set_index('t')
-                # Columns are automatically named from the keys in 'o'
-                return df
-            except Exception as e:
-                raise ValueError(f"Failed to convert nested JSON [{'t': ..., 'o': {...}}] to DataFrame: {e}")
-
-        # Add more cases here if other JSON structures need handling
-
-        else:
-            # If the first item doesn't match known structures ('v' or 'o')
-            raise ValueError("JSON data does not match expected formats: [{'t':..., 'v':...}] or [{'t':..., 'o':{...}}]")
-
+    if isinstance(data, str):
+        return _dataframe_from_csv(data, path)
+    elif isinstance(data, list):
+        return _dataframe_from_json(data, path)
     else:
-        raise ValueError(f"Unexpected data type for DataFrame conversion: {type(data)}") 
+        raise ValueError(f"Unexpected data type for DataFrame conversion: {type(data)}")
+
 
 def convert_bulk_to_dataframe(
     bulk_response: Dict[str, Any],
@@ -262,125 +385,39 @@ def convert_bulk_to_dataframe(
     Raises:
         ValueError: If the input format is invalid, the output_structure is unknown,
                     or conversion fails.
-        ImportError: If pandas is not installed.
     """
+    # --- Input Validation ---
     if output_structure not in ["wide", "dict_by_asset", "dict_by_metric"]:
         raise ValueError(f"Invalid output_structure: '{output_structure}'. Must be 'wide', 'dict_by_asset', or 'dict_by_metric'.")
-        
+
     if not isinstance(bulk_response, dict) or 'data' not in bulk_response:
         raise ValueError("Input must be a dictionary with a 'data' key containing the bulk list.")
 
-    data_list = bulk_response['data']
+    data_list = bulk_response.get('data') # Use .get for slightly safer access
     if not isinstance(data_list, list):
-        raise ValueError("The 'data' key must contain a list.")
+        # Allow empty list, but raise if 'data' exists and is not a list
+        if data_list is not None:
+             raise ValueError("The 'data' key must contain a list.")
+        else:
+             data_list = [] # Treat missing 'data' as empty list
 
+    # Handle empty data early
     if not data_list:
-        # Return empty based on requested structure
         if output_structure == "wide":
             return pd.DataFrame()
-        else:
+        else: # dict_by_asset or dict_by_metric
             return {}
 
-    # --- Step 1: Parse into a flat list of records --- 
-    flat_data = []
-    all_metric_keys = set() # Keep track of unique metric identifiers
-    all_assets = set()      # Keep track of unique assets
+    # --- Processing Steps ---
+    # 1. Flatten the response
+    flat_df, all_assets, all_metric_keys = _flatten_bulk_response(data_list)
 
-    for timestamp_entry in data_list:
-        if not isinstance(timestamp_entry, dict) or 't' not in timestamp_entry or 'bulk' not in timestamp_entry:
-            print(f"Warning: Skipping invalid timestamp entry: {timestamp_entry}")
-            continue
-
-        timestamp = timestamp_entry['t']
-        bulk_items = timestamp_entry['bulk']
-
-        if not isinstance(bulk_items, list):
-             print(f"Warning: Skipping invalid bulk entry (not a list) for timestamp {timestamp}: {bulk_items}")
-             continue
-             
-        for item in bulk_items:
-            if not isinstance(item, dict) or 'v' not in item:
-                print(f"Warning: Skipping invalid item within bulk list for timestamp {timestamp}: {item}")
-                continue
-
-            value = item['v']
-            identifiers = {k: str(v) for k, v in item.items() if k != 'v'} # Ensure keys are strings for sorting
-            
-            asset = identifiers.pop('a', None) # Use None if 'a' is not present
-            all_assets.add(asset) # Add asset (even if None)
-
-            # Generate the metric_key from remaining identifiers
-            metric_parts = []
-            for key in sorted(identifiers.keys()):
-                metric_parts.append(f"{key}_{identifiers[key]}")
-            metric_key = "_".join(metric_parts) if metric_parts else (asset if asset else 'value') # Fallback naming
-            all_metric_keys.add(metric_key)
-
-            flat_data.append({
-                't': timestamp,
-                'asset': asset,
-                'metric_key': metric_key,
-                'value': value
-            })
-    # --- End Step 1 --- 
-    
-    if not flat_data:
-        if output_structure == "wide":
+    # Handle case where flattening resulted in empty DataFrame (e.g., all items were invalid)
+    if flat_df.empty:
+         if output_structure == "wide":
             return pd.DataFrame()
-        else:
+         else:
             return {}
-            
-    # --- Step 2: Convert flat list to desired output structure --- 
-    try:
-        # Create a DataFrame from the flat list for easier manipulation
-        flat_df = pd.DataFrame(flat_data)
-        flat_df['t'] = pd.to_datetime(flat_df['t'], unit='s')
 
-        if output_structure == "wide":
-            # Combine asset and metric_key for wide format columns
-            def create_wide_col_name(row):
-                if row['asset'] is None:
-                    return row['metric_key']
-                # Avoid double asset name if metric_key already is the asset (e.g. only 'a' and 'v' present)
-                if row['metric_key'] == row['asset']:
-                     return str(row['asset'])
-                return f"{row['asset']}_{row['metric_key']}"
-            
-            flat_df['wide_col'] = flat_df.apply(create_wide_col_name, axis=1)
-            
-            wide_df = flat_df.pivot_table(index='t', columns='wide_col', values='value')
-            return wide_df
-
-        elif output_structure == "dict_by_asset":
-            result_dict = {}
-            # Use pd.Categorical for potentially better grouping performance
-            flat_df['asset'] = pd.Categorical(flat_df['asset'])
-            # Add observed=False to groupby to silence FutureWarning
-            for asset, group_df in flat_df.groupby('asset', observed=False):
-                # Pivot each group: index=time, columns=metric_key
-                asset_df = group_df.pivot_table(index='t', columns='metric_key', values='value')
-                # Reindex to ensure all metric keys are present as columns, filled with NaN
-                # Remove axis=1 as 'columns' implies the axis
-                asset_df = asset_df.reindex(columns=sorted(list(all_metric_keys)))
-                result_dict[asset] = asset_df
-            return result_dict
-            
-        elif output_structure == "dict_by_metric":
-            result_dict = {}
-            flat_df['metric_key'] = pd.Categorical(flat_df['metric_key'])
-            # Add observed=False to groupby to silence FutureWarning
-            for metric_key, group_df in flat_df.groupby('metric_key', observed=False):
-                # Pivot each group: index=time, columns=asset
-                metric_df = group_df.pivot_table(index='t', columns='asset', values='value')
-                 # Reindex to ensure all assets are present as columns, filled with NaN
-                # Ensure assets used for columns are strings or handle None appropriately
-                asset_cols = sorted([str(a) if a is not None else 'None' for a in all_assets]) # Use 'None' string for None asset
-                metric_df.columns = [str(c) if c is not None else 'None' for c in metric_df.columns] # Rename existing columns
-                # Remove axis=1 as 'columns' implies the axis
-                metric_df = metric_df.reindex(columns=asset_cols)
-                result_dict[metric_key] = metric_df
-            return result_dict
-            
-    except Exception as e:
-        raise ValueError(f"Failed to create output structure '{output_structure}' from bulk data: {e}")
-    # --- End Step 2 --- 
+    # 2. Structure the flattened data
+    return _structure_bulk_dataframe(flat_df, output_structure, all_assets, all_metric_keys)
