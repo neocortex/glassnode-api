@@ -9,8 +9,7 @@ import json
 import time
 import datetime
 import re
-from utils import convert_to_unix_timestamp, merge_bulk_data
-import utils
+from utils import convert_to_unix_timestamp, merge_bulk_data, convert_to_dataframe, convert_bulk_to_dataframe
 import pandas as pd
 
 
@@ -188,10 +187,10 @@ class GlassnodeAPIClient:
         params = {"a": asset, "f": format, **kwargs}
 
         if since is not None:
-            params["s"] = utils.convert_to_unix_timestamp(since)
+            params["s"] = convert_to_unix_timestamp(since)
 
         if until is not None:
-            params["u"] = utils.convert_to_unix_timestamp(until)
+            params["u"] = convert_to_unix_timestamp(until)
 
         if interval is not None:
             params["i"] = interval
@@ -206,7 +205,7 @@ class GlassnodeAPIClient:
         if effective_format == "pandas":
             try:
                 # Attempt conversion using the utility function
-                return utils.convert_to_dataframe(raw_response, path)
+                return convert_to_dataframe(raw_response, path)
             except ValueError as e:
                 # Re-raise conversion errors with more context
                 raise ValueError(f"Failed to convert data to DataFrame: {e}")
@@ -392,13 +391,13 @@ class GlassnodeAPIClient:
             params["c"] = currency
 
         # Set until timestamp
-        until_ts = int(time.time()) if until is None else utils.convert_to_unix_timestamp(until)
+        until_ts = int(time.time()) if until is None else convert_to_unix_timestamp(until)
 
         # --- Fetch Raw Data (Handle Pagination) --- 
         raw_response: Dict
         if paginate:
             # Convert since to timestamp if provided
-            since_ts = utils.convert_to_unix_timestamp(since) if since is not None else None
+            since_ts = convert_to_unix_timestamp(since) if since is not None else None
             
             # Paginated fetch always returns a dictionary (combined raw data)
             raw_response = self._paginated_bulk_fetch(
@@ -417,7 +416,7 @@ class GlassnodeAPIClient:
             if since is None:
                 since_ts = until_ts - max_timerange
             else:
-                since_ts = utils.convert_to_unix_timestamp(since)
+                since_ts = convert_to_unix_timestamp(since)
                 if (until_ts - since_ts) > max_timerange:
                     since_ts = until_ts - max_timerange
                     print(f"Warning: Requested timerange for interval '{interval}' exceeds {max_days} days. Adjusting 'since' timestamp.")
@@ -433,7 +432,7 @@ class GlassnodeAPIClient:
         if effective_format == "pandas":
             try:
                 # Use the dedicated bulk conversion function with the specified structure
-                return utils.convert_bulk_to_dataframe(
+                return convert_bulk_to_dataframe(
                     raw_response,
                     output_structure=effective_bulk_structure
                 )
