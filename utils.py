@@ -239,26 +239,34 @@ def convert_to_dataframe(data: Union[List[Dict[str, Any]], str], path: str) -> p
     else:
         raise ValueError(f"Unexpected data type for DataFrame conversion: {type(data)}") 
 
-def convert_bulk_to_dataframe(bulk_response: Dict[str, Any]) -> pd.DataFrame:
+def convert_bulk_to_dataframe(
+    bulk_response: Dict[str, Any],
+    output_structure: str = "wide"
+) -> Union[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """
-    Convert a Glassnode bulk API response (dictionary format) into a pandas DataFrame.
-
-    Assumes the input is the direct dictionary returned by the API call,
-    containing a 'data' key with a list of timestamped bulk items.
+    Convert a Glassnode bulk API response into a pandas DataFrame or a dictionary of DataFrames.
 
     Args:
         bulk_response: The raw dictionary response from a bulk API endpoint.
+        output_structure: The desired output format ('wide', 'dict_by_asset', 'dict_by_metric').
+            - "wide" (default): Returns a single DataFrame with timestamps as index and
+              combined identifiers (e.g., 'BTC_network_eth') as columns.
+            - "dict_by_asset": Returns a dictionary where keys are asset symbols and
+              values are DataFrames (index=timestamp, columns=metric_identifiers).
+            - "dict_by_metric": Returns a dictionary where keys are metric identifiers
+              (e.g., 'network_eth') and values are DataFrames (index=timestamp, columns=asset).
 
     Returns:
-        pd.DataFrame: A DataFrame where the index is datetime timestamps, and
-                      columns represent the unique combinations of identifiers
-                      found in the bulk data (e.g., 'BTC_price', 'ETH_network_arb').
+        Union[pd.DataFrame, Dict[str, pd.DataFrame]]: The processed data in the specified structure.
 
     Raises:
-        ValueError: If the input format is not the expected dictionary structure,
-                    or if conversion fails.
+        ValueError: If the input format is invalid, the output_structure is unknown,
+                    or conversion fails.
         ImportError: If pandas is not installed.
     """
+    if output_structure not in ["wide", "dict_by_asset", "dict_by_metric"]:
+        raise ValueError(f"Invalid output_structure: '{output_structure}'. Must be 'wide', 'dict_by_asset', or 'dict_by_metric'.")
+        
     if not isinstance(bulk_response, dict) or 'data' not in bulk_response:
         raise ValueError("Input must be a dictionary with a 'data' key containing the bulk list.")
 
@@ -267,13 +275,16 @@ def convert_bulk_to_dataframe(bulk_response: Dict[str, Any]) -> pd.DataFrame:
         raise ValueError("The 'data' key must contain a list.")
 
     if not data_list:
-        return pd.DataFrame() # Return empty DataFrame if no data
+        # Return empty based on requested structure
+        if output_structure == "wide":
+            return pd.DataFrame()
+        else:
+            return {}
 
-    # Use a dictionary to collect data before creating DataFrame for efficiency
-    # Structure: {timestamp: {column_name: value, ...}, ...}
-    data_for_df = {}
-
-    processed_column_names = set() # To track unique columns generated
+    # --- Step 1: Parse into a flat list of records --- 
+    flat_data = []
+    all_metric_keys = set() # Keep track of unique metric identifiers
+    all_assets = set()      # Keep track of unique assets
 
     for timestamp_entry in data_list:
         if not isinstance(timestamp_entry, dict) or 't' not in timestamp_entry or 'bulk' not in timestamp_entry:
@@ -282,9 +293,6 @@ def convert_bulk_to_dataframe(bulk_response: Dict[str, Any]) -> pd.DataFrame:
 
         timestamp = timestamp_entry['t']
         bulk_items = timestamp_entry['bulk']
-
-        if timestamp not in data_for_df:
-            data_for_df[timestamp] = {}
 
         if not isinstance(bulk_items, list):
              print(f"Warning: Skipping invalid bulk entry (not a list) for timestamp {timestamp}: {bulk_items}")
@@ -296,43 +304,83 @@ def convert_bulk_to_dataframe(bulk_response: Dict[str, Any]) -> pd.DataFrame:
                 continue
 
             value = item['v']
-            identifiers = {k: v for k, v in item.items() if k != 'v'}
+            identifiers = {k: str(v) for k, v in item.items() if k != 'v'} # Ensure keys are strings for sorting
             
-            # --- Generate Column Name ---            
-            col_parts = []
-            asset = identifiers.pop('a', None) # Extract asset 'a' if present
-            if asset:
-                col_parts.append(str(asset))
-            
-            # Add other identifiers sorted by key
+            asset = identifiers.pop('a', None) # Use None if 'a' is not present
+            all_assets.add(asset) # Add asset (even if None)
+
+            # Generate the metric_key from remaining identifiers
+            metric_parts = []
             for key in sorted(identifiers.keys()):
-                col_parts.append(f"{key}_{identifiers[key]}")
-                
-            if not col_parts: # Handle cases where there might be no identifiers other than 'v'
-                column_name = 'value' # Or potentially derive from path if available
-            else:
-                column_name = "_".join(col_parts)
-            # --- End Column Name Generation --- 
+                metric_parts.append(f"{key}_{identifiers[key]}")
+            metric_key = "_".join(metric_parts) if metric_parts else (asset if asset else 'value') # Fallback naming
+            all_metric_keys.add(metric_key)
+
+            flat_data.append({
+                't': timestamp,
+                'asset': asset,
+                'metric_key': metric_key,
+                'value': value
+            })
+    # --- End Step 1 --- 
+    
+    if not flat_data:
+        if output_structure == "wide":
+            return pd.DataFrame()
+        else:
+            return {}
             
-            # Add data point to the collection for this timestamp
-            if column_name in data_for_df[timestamp]:
-                 print(f"Warning: Duplicate column name '{column_name}' generated for timestamp {timestamp}. Check identifiers in bulk data. Overwriting previous value.")
-            data_for_df[timestamp][column_name] = value
-            processed_column_names.add(column_name)
-
-    # Convert the collected data into a DataFrame
-    if not data_for_df:
-         return pd.DataFrame() # Return empty if nothing was processed
-         
+    # --- Step 2: Convert flat list to desired output structure --- 
     try:
-        df = pd.DataFrame.from_dict(data_for_df, orient='index')
-        # Ensure all columns discovered across all timestamps are present
-        df = df.reindex(columns=sorted(list(processed_column_names))) 
-        
-        # Convert index (timestamps) to datetime
-        df.index = pd.to_datetime(df.index, unit='s')
-        df.index.name = 't' # Name the index
-    except Exception as e:
-        raise ValueError(f"Failed to create DataFrame from processed bulk data: {e}")
+        # Create a DataFrame from the flat list for easier manipulation
+        flat_df = pd.DataFrame(flat_data)
+        flat_df['t'] = pd.to_datetime(flat_df['t'], unit='s')
 
-    return df 
+        if output_structure == "wide":
+            # Combine asset and metric_key for wide format columns
+            def create_wide_col_name(row):
+                if row['asset'] is None:
+                    return row['metric_key']
+                # Avoid double asset name if metric_key already is the asset (e.g. only 'a' and 'v' present)
+                if row['metric_key'] == row['asset']:
+                     return str(row['asset'])
+                return f"{row['asset']}_{row['metric_key']}"
+            
+            flat_df['wide_col'] = flat_df.apply(create_wide_col_name, axis=1)
+            
+            wide_df = flat_df.pivot_table(index='t', columns='wide_col', values='value')
+            return wide_df
+
+        elif output_structure == "dict_by_asset":
+            result_dict = {}
+            # Use pd.Categorical for potentially better grouping performance
+            flat_df['asset'] = pd.Categorical(flat_df['asset'])
+            # Add observed=False to groupby to silence FutureWarning
+            for asset, group_df in flat_df.groupby('asset', observed=False):
+                # Pivot each group: index=time, columns=metric_key
+                asset_df = group_df.pivot_table(index='t', columns='metric_key', values='value')
+                # Reindex to ensure all metric keys are present as columns, filled with NaN
+                # Remove axis=1 as 'columns' implies the axis
+                asset_df = asset_df.reindex(columns=sorted(list(all_metric_keys)))
+                result_dict[asset] = asset_df
+            return result_dict
+            
+        elif output_structure == "dict_by_metric":
+            result_dict = {}
+            flat_df['metric_key'] = pd.Categorical(flat_df['metric_key'])
+            # Add observed=False to groupby to silence FutureWarning
+            for metric_key, group_df in flat_df.groupby('metric_key', observed=False):
+                # Pivot each group: index=time, columns=asset
+                metric_df = group_df.pivot_table(index='t', columns='asset', values='value')
+                 # Reindex to ensure all assets are present as columns, filled with NaN
+                # Ensure assets used for columns are strings or handle None appropriately
+                asset_cols = sorted([str(a) if a is not None else 'None' for a in all_assets]) # Use 'None' string for None asset
+                metric_df.columns = [str(c) if c is not None else 'None' for c in metric_df.columns] # Rename existing columns
+                # Remove axis=1 as 'columns' implies the axis
+                metric_df = metric_df.reindex(columns=asset_cols)
+                result_dict[metric_key] = metric_df
+            return result_dict
+            
+    except Exception as e:
+        raise ValueError(f"Failed to create output structure '{output_structure}' from bulk data: {e}")
+    # --- End Step 2 --- 

@@ -11,6 +11,7 @@ import datetime
 import re
 from utils import convert_to_unix_timestamp, merge_bulk_data
 import utils
+import pandas as pd
 
 # Conditional import for pandas type hinting
 from typing import TYPE_CHECKING
@@ -319,8 +320,9 @@ class GlassnodeAPIClient:
         currency: Optional[str] = "native",
         paginate: bool = False,
         return_format: Optional[str] = None,
+        bulk_output_structure: Optional[str] = None,
         **kwargs
-    ) -> Union[Dict, 'pd.DataFrame']:
+    ) -> Union[Dict, pd.DataFrame, Dict[str, pd.DataFrame]]:
         """
         Fetch data for a metric using Glassnode's bulk endpoint.
 
@@ -335,23 +337,28 @@ class GlassnodeAPIClient:
             interval: Optional resolution interval (defaults to "24h")
             currency: Optional currency for metrics that support it ("native" or "USD")
             paginate: If True, automatically handle pagination for large time ranges.
-                      The returned DataFrame will contain combined data from all pages.
+                      The returned DataFrame/Dict will contain combined data from all pages.
             return_format: Desired format for the returned data. Options:
                 - "raw": Returns the raw JSON response as a dictionary.
-                - "pandas": Returns a pandas DataFrame with a datetime index and columns derived
-                          from the identifiers in the bulk data (e.g., 'BTC_price', 'ETH_network_arb').
-                          Requires pandas to be installed.
+                - "pandas": Returns processed data as pandas object(s). The specific structure
+                          is determined by `bulk_output_structure`.
                 - None (default): Uses the client's `return_format_default` attribute.
+            bulk_output_structure: Specifies the structure when `return_format` is "pandas". Options:
+                - "wide": Returns a single DataFrame with combined identifiers as columns.
+                - "dict_by_asset": Returns a Dict[asset, DataFrame].
+                - "dict_by_metric": Returns a Dict[metric_key, DataFrame].
+                - None (default): Defaults to "wide".
             **kwargs: Additional parameters to pass to the API
 
         Returns:
-            Union[Dict, pd.DataFrame]: Bulk metric data in the specified format.
-            - If the effective format is "raw", returns the raw response dictionary.
-            - If the effective format is "pandas", returns a pandas DataFrame.
+            Union[Dict, pd.DataFrame, Dict[str, pd.DataFrame]]: Bulk metric data.
+            - If effective format is "raw", returns raw Dict.
+            - If effective format is "pandas", returns pd.DataFrame or Dict[str, pd.DataFrame]
+              based on `bulk_output_structure`.
 
         Raises:
             ValueError: If the metric does not support bulk operations, if the effective return_format
-                      is invalid, or if DataFrame conversion fails.
+                      or bulk_output_structure is invalid, or if DataFrame conversion fails.
             requests.exceptions.HTTPError: For API request errors.
             ImportError: If return_format="pandas" is requested but pandas is not installed.
 
@@ -369,7 +376,9 @@ class GlassnodeAPIClient:
         """
         # Determine the effective return format
         effective_format = return_format if return_format is not None else self.return_format_default
-        
+        # Determine the effective bulk output structure (only relevant if returning pandas)
+        effective_bulk_structure = bulk_output_structure if bulk_output_structure is not None else "wide"
+
         # Check if the metric supports bulk operations
         metadata = self.get_metric_metadata(path)
         if not metadata.get("bulk_supported", False):
@@ -428,12 +437,16 @@ class GlassnodeAPIClient:
         # --- Process based on effective format --- 
         if effective_format == "pandas":
             try:
-                # Use the dedicated bulk conversion function
-                return utils.convert_bulk_to_dataframe(raw_response)
+                # Use the dedicated bulk conversion function with the specified structure
+                return utils.convert_bulk_to_dataframe(
+                    raw_response,
+                    output_structure=effective_bulk_structure
+                )
             except ImportError:
                  raise ImportError("Pandas is required for 'pandas' return format. Please install pandas.")
             except ValueError as e:
-                raise ValueError(f"Failed to convert bulk data to DataFrame: {e}")
+                # Add context about the requested structure to the error
+                raise ValueError(f"Failed to convert bulk data to DataFrame (structure='{effective_bulk_structure}'): {e}")
         elif effective_format == "raw":
             return raw_response
         else:
