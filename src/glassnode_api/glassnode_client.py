@@ -9,7 +9,7 @@ import json
 import time
 import datetime
 import re
-from .utils import convert_to_unix_timestamp, merge_bulk_data, convert_to_dataframe, convert_bulk_to_dataframe
+from .utils import convert_to_unix_timestamp, merge_bulk_data, convert_to_dataframe, convert_bulk_to_dataframe, calculate_since_for_limit
 import pandas as pd
 
 
@@ -144,10 +144,11 @@ class GlassnodeAPIClient:
         asset: str,
         since: Optional[Union[int, str, datetime.datetime]] = None,
         until: Optional[Union[int, str, datetime.datetime]] = None,
-        interval: Optional[str] = None,
+        interval: Optional[str] = "24h",
         format: Optional[str] = "json",
         currency: Optional[str] = "native",
         return_format: Optional[str] = None,
+        limit: Optional[int] = None,
         **kwargs
     ) -> Union[List[Dict], str, 'pd.DataFrame']:
         """
@@ -158,7 +159,7 @@ class GlassnodeAPIClient:
             asset: The asset symbol (e.g., "BTC")
             since: Optional start date as Unix timestamp, string date format, or datetime object
             until: Optional end date as Unix timestamp, string date format, or datetime object
-            interval: Optional resolution interval
+            interval: Optional resolution interval (defaults to "24h")
             format: Response format ('json' or 'csv'). Note: 'pandas' return format works best with 'json'.
             currency: Optional currency for metrics that support it ("native" or "USD")
             return_format: Desired format for the returned data. Options:
@@ -166,6 +167,9 @@ class GlassnodeAPIClient:
                 - "pandas": Returns a pandas DataFrame with a datetime index and a value column.
                   Requires pandas to be installed.
                 - None (default): Uses the client's `return_format_default` attribute.
+            limit: Optional number of data points to retrieve. If specified, it will calculate
+                  the appropriate 'since' parameter to get exactly this many data points.
+                  Always returns the most recent data points.
             **kwargs: Additional parameters to pass to the API
 
         Returns:
@@ -185,6 +189,14 @@ class GlassnodeAPIClient:
         effective_format = return_format if return_format is not None else self.return_format_default
         
         params = {"a": asset, "f": format, **kwargs}
+
+        # Calculate the 'since' parameter based on 'limit', if provided
+        if limit is not None and limit > 0:
+            # When limit is specified, always use current time as 'until'
+            until = int(time.time())
+            
+            # Calculate 'since' based on 'limit' to get the most recent datapoints
+            since = calculate_since_for_limit(interval, limit)
 
         if since is not None:
             params["s"] = convert_to_unix_timestamp(since)
@@ -310,11 +322,12 @@ class GlassnodeAPIClient:
         assets: Optional[List[str]] = None,
         since: Optional[Union[int, str, datetime.datetime]] = None,
         until: Optional[Union[int, str, datetime.datetime]] = None,
-        interval: Optional[str] = "24h",
+        interval: str = "24h",
         currency: Optional[str] = "native",
         paginate: bool = False,
         return_format: Optional[str] = None,
         bulk_output_structure: Optional[str] = None,
+        limit: Optional[int] = None,
         **kwargs
     ) -> Union[Dict, pd.DataFrame, Dict[str, pd.DataFrame]]:
         """
@@ -328,7 +341,7 @@ class GlassnodeAPIClient:
             assets: Optional list of asset symbols (e.g., ["BTC", "ETH"])
             since: Optional start date as Unix timestamp, string date format, or datetime object
             until: Optional end date as Unix timestamp, string date format, or datetime object
-            interval: Optional resolution interval (defaults to "24h")
+            interval: Resolution interval (defaults to "24h")
             currency: Optional currency for metrics that support it ("native" or "USD")
             paginate: If True, automatically handle pagination for large time ranges.
                       The returned DataFrame/Dict will contain combined data from all pages.
@@ -342,6 +355,9 @@ class GlassnodeAPIClient:
                 - "dict_by_asset": Returns a Dict[asset, DataFrame].
                 - "dict_by_metric": Returns a Dict[metric_key, DataFrame].
                 - None (default): Defaults to "wide".
+            limit: Optional number of data points to retrieve. If specified, it will calculate
+                  the appropriate 'since' parameter to get exactly this many data points.
+                  Always returns the most recent data points.
             **kwargs: Additional parameters to pass to the API
 
         Returns:
@@ -390,8 +406,18 @@ class GlassnodeAPIClient:
         if currency is not None:
             params["c"] = currency
 
-        # Set until timestamp
-        until_ts = int(time.time()) if until is None else convert_to_unix_timestamp(until)
+        # Calculate the 'since' parameter based on 'limit', if provided
+        if limit is not None and limit > 0:
+            # When limit is specified, always use current time as 'until'
+            until_ts = int(time.time())
+            
+            # Calculate 'since' based on 'limit' to get the most recent datapoints
+            since = calculate_since_for_limit(interval, limit)
+            # When using limit, we'll disable pagination as we know exactly what range we want
+            paginate = False
+        else:
+            # Set until timestamp
+            until_ts = int(time.time()) if until is None else convert_to_unix_timestamp(until)
 
         # --- Fetch Raw Data (Handle Pagination) --- 
         raw_response: Dict

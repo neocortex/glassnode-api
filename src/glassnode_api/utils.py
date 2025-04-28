@@ -5,6 +5,7 @@ import datetime
 from typing import Union, List, Dict, Any, Tuple, Set
 import pandas as pd
 from io import StringIO
+import time
 
 
 def convert_to_unix_timestamp(date_value: Union[int, str, datetime.datetime]) -> int:
@@ -61,6 +62,49 @@ def convert_to_unix_timestamp(date_value: Union[int, str, datetime.datetime]) ->
                 
     # If we get here, the format wasn't recognized
     raise ValueError(f"Could not parse date value: {date_value}. Please provide a Unix timestamp or a recognized date format.")
+
+
+def calculate_since_for_limit(interval: str = '24h', limit: int = 100) -> int:
+    """
+    Calculate the 'since' timestamp that will return 'limit' number of data points 
+    for a given interval, using the current time as the end point.
+    
+    This function is designed to be used when retrieving the most recent data points.
+    
+    Args:
+        interval: Resolution interval (defaults to '24h')
+        limit: Number of data points to retrieve (defaults to 100)
+        
+    Returns:
+        int: The 'since' timestamp
+        
+    Raises:
+        ValueError: If interval format is not recognized
+    """
+    if limit <= 0:
+        raise ValueError("Limit must be a positive integer")
+        
+    # Always use current time as the until timestamp
+    until_ts = int(time.time())
+    
+    # Define interval seconds mapping
+    interval_seconds = {
+        '10m': 10 * 60,
+        '1h': 60 * 60,
+        '24h': 24 * 60 * 60,
+        '1d': 24 * 60 * 60,
+        '1w': 7 * 24 * 60 * 60,
+        '1month': 30 * 24 * 60 * 60,  # Approximation
+    }
+    
+    # Get seconds per interval (use 24h as default if not recognized)
+    seconds_per_interval = interval_seconds.get(interval, interval_seconds['24h'])
+    
+    # Calculate the since timestamp by subtracting (limit-1) intervals from until
+    # We use (limit-1) because the data includes the 'until' timestamp point
+    since_ts = until_ts - (limit - 1) * seconds_per_interval
+    
+    return since_ts
 
 def merge_bulk_data(combined_data, chunk_data, direction="forward"):
     """
