@@ -169,7 +169,7 @@ class GlassnodeAPIClient:
                 - None (default): Uses the client's `return_format_default` attribute.
             limit: Optional number of data points to retrieve. If specified, it will calculate
                   the appropriate 'since' parameter to get exactly this many data points.
-                  Always returns the most recent data points.
+                  Always returns the most recent data points. Will be enforced to be at least 3.
             **kwargs: Additional parameters to pass to the API
 
         Returns:
@@ -357,7 +357,7 @@ class GlassnodeAPIClient:
                 - None (default): Defaults to "wide".
             limit: Optional number of data points to retrieve. If specified, it will calculate
                   the appropriate 'since' parameter to get exactly this many data points.
-                  Always returns the most recent data points.
+                  Always returns the most recent data points. Will be enforced to be at least 3.
             **kwargs: Additional parameters to pass to the API
 
         Returns:

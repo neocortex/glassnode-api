@@ -84,6 +84,9 @@ def calculate_since_for_limit(interval: str = '24h', limit: int = 100) -> int:
     if limit <= 0:
         raise ValueError("Limit must be a positive integer")
         
+    # Ensure limit is at least 3
+    limit = max(limit, 3)
+
     # Always use current time as the until timestamp
     until_ts = int(time.time())
     
