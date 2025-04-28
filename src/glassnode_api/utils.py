@@ -100,9 +100,10 @@ def calculate_since_for_limit(interval: str = '24h', limit: int = 100) -> int:
     # Get seconds per interval (use 24h as default if not recognized)
     seconds_per_interval = interval_seconds.get(interval, interval_seconds['24h'])
     
-    # Calculate the since timestamp by subtracting (limit-1) intervals from until
-    # We use (limit-1) because the data includes the 'until' timestamp point
-    since_ts = until_ts - (limit - 1) * seconds_per_interval
+    # Calculate the since timestamp by subtracting 'limit' intervals from until
+    # We use 'limit' instead of (limit-1) to go back one additional datapoint
+    # This ensures the since timestamp is always earlier than until
+    since_ts = until_ts - limit * seconds_per_interval
     
     return since_ts
 
