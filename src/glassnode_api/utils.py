@@ -2,10 +2,12 @@
 Utility functions for Glassnode API client
 """
 import datetime
-from typing import Union, List, Dict, Any, Tuple, Set
+from typing import Union, List, Dict, Any, Tuple, Set, Optional
 import pandas as pd
 from io import StringIO
 import time
+import json
+import os
 
 
 def convert_to_unix_timestamp(date_value: Union[int, str, datetime.datetime]) -> int:
@@ -469,3 +471,44 @@ def convert_bulk_to_dataframe(
 
     # 2. Structure the flattened data
     return _structure_bulk_dataframe(flat_df, output_structure, all_assets, all_metric_keys)
+
+# --- Cache Utility Functions ---
+
+def load_json_cache(file_path: str) -> Optional[Dict]:
+    """
+    Load data from a JSON cache file.
+
+    Args:
+        file_path: Path to the JSON cache file.
+
+    Returns:
+        dict: The loaded data if the file exists and is valid JSON.
+        None: If the file does not exist or cannot be parsed.
+    """
+    if not os.path.exists(file_path):
+        print(f"Cache file not found: {file_path}")
+        return None
+        
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        print(f"Loaded data from cache file: {file_path}")
+        return data
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"Warning: Could not load or parse cache file '{file_path}'. Error: {e}")
+        return None
+
+def save_json_cache(data: Dict, file_path: str):
+    """
+    Save data to a JSON cache file.
+
+    Args:
+        data: The dictionary data to save.
+        file_path: Path to the JSON cache file.
+    """
+    try:
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=4)
+        print(f"Data saved to cache file: {file_path}")
+    except IOError as e:
+        print(f"Warning: Could not save cache file '{file_path}'. Error: {e}")

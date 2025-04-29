@@ -9,7 +9,12 @@ import json
 import time
 import datetime
 import re
-from .utils import convert_to_unix_timestamp, merge_bulk_data, convert_to_dataframe, convert_bulk_to_dataframe, calculate_since_for_limit
+import os # Added for cache file path handling
+from .utils import (
+    convert_to_unix_timestamp, merge_bulk_data, convert_to_dataframe, 
+    convert_bulk_to_dataframe, calculate_since_for_limit,
+    load_json_cache, save_json_cache  # Import cache utils
+)
 import pandas as pd
 
 
@@ -135,6 +140,93 @@ class GlassnodeAPIClient:
             params["a"] = asset
 
         return self._make_request("metadata/metric", params)
+        
+    def _build_asset_metrics_map(self) -> Dict[str, List[str]]:
+        """
+        Internal helper to build the map of assets to their supported metrics.
+        Fetches metadata for all metrics and extracts asset support.
+        Includes rate limiting.
+
+        Returns:
+            Dict[str, List[str]]: A dictionary mapping asset symbols to lists of metric paths.
+        """
+        print("Generating asset-to-metrics mapping from API (this may take a while)...")
+        all_metrics = self.get_metrics_list()
+        asset_to_metrics_map = {}
+
+        for i, metric_path in enumerate(all_metrics):
+              # Print progress indicator
+            if (i + 1) % 50 == 0 or i == len(all_metrics) - 1:
+                 print(f"  Processed {i + 1}/{len(all_metrics)} metrics...")
+
+            try:
+                # Fetch metadata for the specific metric path
+                metadata = self.get_metric_metadata(path=metric_path)
+                # Extract assets under parameters -> 'a'
+                supported_assets_list = metadata.get("parameters", {}).get("a", [])
+                
+                # Add a longer pause after every 500 requests (consider if needed with other rate limiting)
+                if (i + 1) % 500 == 0:
+                     print(f"  Pausing for 45 seconds after {i + 1} requests to respect rate limits...")
+                     time.sleep(45)
+
+                # Iterate through the list of asset symbols (strings)
+                for asset_symbol in supported_assets_list:
+                    if asset_symbol not in asset_to_metrics_map:
+                        asset_to_metrics_map[asset_symbol] = []
+                    if metric_path not in asset_to_metrics_map[asset_symbol]:
+                        asset_to_metrics_map[asset_symbol].append(metric_path)
+
+            except requests.exceptions.HTTPError as e:
+                # Log error for a specific metric but continue with others
+                print(f"Warning: Failed to fetch metadata for metric '{metric_path}'. Skipping. Error: {e}")
+            except Exception as e: # Catch other potential errors
+                print(f"Warning: An unexpected error occurred while processing metric '{metric_path}'. Skipping. Error: {e}")
+
+        print(f"Finished processing all metrics. Found metrics for {len(asset_to_metrics_map)} assets.")
+        return asset_to_metrics_map
+
+    def get_asset_metrics(
+        self,
+        asset: str,
+        use_cache: bool = True,
+        cache_file: str = "asset_metrics_cache.json"
+    ) -> List[str]:
+        """
+        Get a list of metric paths available for a specific asset.
+
+        Uses caching to store the asset-to-metric mapping locally.
+
+        Args:
+            asset: The asset symbol (e.g., "BTC") to find metrics for.
+            use_cache: If True (default), try to load from the cache file first.
+                       If False or the file doesn't exist/is invalid, it regenerates
+                       the mapping by calling the API and saves it to the cache file.
+            cache_file: The path to the JSON file used for caching the mapping.
+
+        Returns:
+            List[str]: A list of metric paths available for the specified asset.
+                       Returns an empty list if the asset is not found or has no metrics.
+
+        Raises:
+            requests.exceptions.HTTPError: If API requests fail during mapping generation.
+            IOError: If there are issues reading or writing the cache file (warnings printed).
+        """
+        asset_to_metrics_map = None
+
+        # Attempt to load from cache if requested
+        if use_cache:
+            asset_to_metrics_map = load_json_cache(cache_file)
+
+        # If cache not used, loading failed, or file didn't exist, regenerate
+        if asset_to_metrics_map is None:
+            asset_to_metrics_map = self._build_asset_metrics_map()
+            # Save the newly generated map (even if empty)
+            save_json_cache(asset_to_metrics_map, cache_file)
+
+        # Return the data for the requested asset from the map (loaded or generated)
+        return asset_to_metrics_map.get(asset, [])
+
 
     # Data endpoints
 
