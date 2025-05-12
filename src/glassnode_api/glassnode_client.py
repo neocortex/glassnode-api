@@ -238,7 +238,7 @@ class GlassnodeAPIClient:
         until: Optional[Union[int, str, datetime.datetime]] = None,
         interval: Optional[str] = "24h",
         format: Optional[str] = "json",
-        currency: Optional[str] = "native",
+        currency: Optional[str] = None,
         return_format: Optional[str] = None,
         limit: Optional[int] = None,
         **kwargs
