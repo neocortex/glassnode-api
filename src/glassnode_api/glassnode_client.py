@@ -303,7 +303,9 @@ class GlassnodeAPIClient:
             params["c"] = currency
 
         # Fetch the raw data
-        raw_response = self._make_request(f"metrics{path}", params)
+        path = path.lstrip("/")
+        endpoint = f"metrics/{path}"
+        raw_response = self._make_request(endpoint, params)
 
         # Process based on the effective format
         if effective_format == "pandas":
